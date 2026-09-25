@@ -1,0 +1,34 @@
+[Unit]
+Description=PC Status: Enter-key wake-up and input blocking while screens are off
+Documentation=file:///usr/local/lib/pc-status/pc_status_enterd.py
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/lib/pc-status/pc_status_enterd.py
+# 能写 /run/pc-status/grab 的用户，install-enterd.sh 安装时填成执行 sudo 的用户
+Environment=PC_STATUS_UID=@UID@
+Restart=on-failure
+RestartSec=3
+# /run/pc-status：服务启动时创建，停掉时删除
+RuntimeDirectory=pc-status
+RuntimeDirectoryMode=0755
+
+# 只需要读（和独占）输入设备、写 /run/pc-status，其余全部收紧
+DevicePolicy=closed
+DeviceAllow=char-input r
+PrivateNetwork=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+# 只留 CAP_CHOWN：把 grab 文件交给 PC Status 的用户
+CapabilityBoundingSet=CAP_CHOWN
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target
