@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=PC Status
+Comment=实时查看 CPU / 内存 / SSD / 网络 / IP 状态
+Exec=/usr/bin/python3 /path/to/pc-status/pc_status.py
+Icon=utilities-system-monitor
+Terminal=false
+StartupWMClass=pc_status
+Categories=System;Monitor;
+StartupNotify=true
