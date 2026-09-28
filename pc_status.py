@@ -26,8 +26,8 @@ DISK_PATH = "/"
 # 网络没有天然的"满格"概念，这里把 5MB/s 视为满格，仅用来给一个直观的活跃度参考。
 NET_BAR_MAX = 5 * 1024 * 1024
 
-MINI_SIZE = (190, 331)
-FULL_SIZE = (572, 421)
+MINI_SIZE = (190, 358)
+FULL_SIZE = (572, 448)
 # 启动位置：贴屏幕右边，从顶部往下约 30% 处
 TOP_RATIO = 0.30
 # 两块屏都黑着时，每隔多久查一次有没有键盘/鼠标操作
@@ -35,9 +35,9 @@ WAKE_POLL_MS = 250
 # 点完按钮后要先安静这么久，之后的操作才算"唤醒"，免得点按钮那一下就把屏幕弄亮
 WAKE_GRACE_MS = 1000
 
-# 无操作自动关屏的设置（开关 + 秒数），界面上改了就存
+# 无操作自动关屏的设置（开关 + 秒数）、合盖不睡眠开关，界面上改了就存
 SETTINGS_FILE = os.path.expanduser("~/.config/pc_status/settings.json")
-DEFAULT_SETTINGS = {"auto_sleep": True, "auto_sleep_seconds": 60}
+DEFAULT_SETTINGS = {"auto_sleep": True, "auto_sleep_seconds": 60, "lid_no_suspend": True}
 # 可选的灭屏时间：15 秒（测试用），然后 1 分、2 分……120 分
 AUTO_SLEEP_CHOICES = [15] + [m * 60 for m in range(1, 121)]
 
@@ -195,6 +195,15 @@ class PCStatusApp(tk.Tk):
             width=5, state="readonly", wrap=False,
             textvariable=self.auto_sleep_time_var, command=self._save_auto_sleep,
         ).pack(side="left", padx=(4, 0))
+        # 合盖不睡眠：PC Status 开着时持有 logind 的合盖锁，见 _sync_lid_inhibit()、_check_lid()
+        self.lid_var = tk.BooleanVar(value=self.settings["lid_no_suspend"])
+        ttk.Checkbutton(
+            self.container, text="合盖不睡眠", variable=self.lid_var,
+            command=self._toggle_lid_inhibit,
+        ).pack(fill="x", padx=8, pady=(4, 0))
+        self._lid_inhibit_fd = None
+        self._lid_closed = None
+        self._sync_lid_inhibit()
         # 倒计时 / 当前状态，每秒在 refresh 里更新
         self.countdown_label = ttk.Label(self.container, text="", anchor="w")
         self.countdown_label.pack(fill="x", padx=10, pady=(2, 0))
@@ -404,16 +413,19 @@ class PCStatusApp(tk.Tk):
         if not self._wake_armed:
             return
         if self._laptop_wake.triggered():
-            log("laptop wake: backlight on")
-            self._wake_armed = False
-            self._sync_input_block()
-            try:
-                pc_status_display.laptop_screen_on()
-            except pc_status_display.DisplayError:
-                pass
-            self._update_laptop_btn()
+            self._wake_laptop("Enter")
             return
         self.after(WAKE_POLL_MS, self._poll_wake)
+
+    def _wake_laptop(self, reason):
+        log(f"laptop wake ({reason}): backlight on")
+        self._wake_armed = False
+        self._sync_input_block()
+        try:
+            pc_status_display.laptop_screen_on()
+        except pc_status_display.DisplayError:
+            pass
+        self._update_laptop_btn()
 
     def _auto_sleep_seconds(self):
         label = self.auto_sleep_time_var.get()
@@ -426,6 +438,58 @@ class PCStatusApp(tk.Tk):
         self.settings.update(
             auto_sleep=self.auto_sleep_var.get(), auto_sleep_seconds=self._auto_sleep_seconds())
         save_settings(self.settings)
+
+    def _toggle_lid_inhibit(self):
+        self.settings.update(lid_no_suspend=self.lid_var.get())
+        save_settings(self.settings)
+        self._sync_lid_inhibit()
+
+    def _sync_lid_inhibit(self):
+        """勾上时持有 logind 的合盖锁（合盖不睡眠），取消勾选就释放，恢复系统默认的合盖睡眠。"""
+        want = self.lid_var.get() and pc_status_display is not None
+        if want and self._lid_inhibit_fd is None:
+            try:
+                self._lid_inhibit_fd = pc_status_display.inhibit_lid_switch(
+                    "PC Status：合盖只关屏，不睡眠")
+                log("lid switch inhibited: closing the lid won't suspend")
+            except pc_status_display.DisplayError as e:
+                log(f"lid switch inhibit failed: {e}")
+                self.lid_var.set(False)
+                messagebox.showerror("PC Status", f"无法阻止合盖睡眠：{e}", parent=self)
+        elif not want and self._lid_inhibit_fd is not None:
+            os.close(self._lid_inhibit_fd)
+            self._lid_inhibit_fd = None
+            log("lid switch inhibit released")
+
+    def _check_lid(self):
+        """合盖 / 开盖（每秒在 refresh 里、灭屏期间在 _poll_auto_wake 里查）。
+
+        合盖且持有合盖锁时：系统不睡眠，但只有笔记本屏的话 Mutter 会让它在盖子里一直亮着，
+        所以跟自动灭屏一样灭屏、屏蔽输入、只认 Enter。HDMI 开着（合盖用外接屏）时不管。
+        开盖是明确想用电脑，直接唤醒：灭着的屏点亮，手动关掉的笔记本屏背光也恢复。"""
+        if not pc_status_display:
+            return
+        closed = pc_status_display.lid_closed()
+        if closed is None or closed == self._lid_closed:
+            return
+        first = self._lid_closed is None
+        self._lid_closed = closed
+        if first:
+            return  # 启动时只记下当前状态
+        log(f"lid {'closed' if closed else 'opened'}")
+        if closed:
+            if self._lid_inhibit_fd is None or self._hdmi_state == "on" or self._asleep:
+                return
+            try:
+                pc_status_display.set_screens_asleep(True)
+            except pc_status_display.DisplayError:
+                return
+            self._enter_asleep()
+        else:
+            if self._asleep:
+                self._wake_screens("lid opened")
+            if self._wake_armed:
+                self._wake_laptop("lid opened")
 
     def _check_auto_sleep(self):
         """每秒在 refresh 里调一次：更新倒计时，空闲够久了就让两块屏一起息屏。"""
@@ -496,6 +560,10 @@ class PCStatusApp(tk.Tk):
     def _poll_auto_wake(self):
         if not self._asleep:
             return
+        # 先看是不是开盖：开盖时 Mutter 也会重新配置，不先处理会被下面当成"不是 Enter"又灭掉
+        self._check_lid()
+        if not self._asleep:
+            return
         reason = self._screens_woken_elsewhere()
         if reason:
             if pc_status_display.last_enter_time() is not None:
@@ -520,20 +588,27 @@ class PCStatusApp(tk.Tk):
                 self._check_auto_sleep()
                 return
         if self._auto_wake.triggered():
-            log("auto wake: screens on")
-            try:
-                pc_status_display.set_screens_asleep(False)
-            except pc_status_display.DisplayError:
-                pass
-            self._asleep = False
-            self._sync_input_block()
-            self._countdown_start = time.monotonic()
-            self._check_auto_sleep()  # 马上刷新倒计时，不等下一秒
+            self._wake_screens("Enter")
             return
         self.after(WAKE_POLL_MS, self._poll_auto_wake)
 
+    def _wake_screens(self, reason):
+        log(f"auto wake ({reason}): screens on")
+        try:
+            pc_status_display.set_screens_asleep(False)
+        except pc_status_display.DisplayError:
+            pass
+        self._asleep = False
+        self._sync_input_block()
+        self._countdown_start = time.monotonic()
+        self._check_auto_sleep()  # 马上刷新倒计时，不等下一秒
+
     def on_close(self):
-        # 关掉 PC Status 时把屏幕都点亮、解除输入屏蔽，不然就没有东西能唤醒它们了
+        # 关掉 PC Status 时把屏幕都点亮、解除输入屏蔽，不然就没有东西能唤醒它们了；
+        # 合盖锁也释放（进程退出本来就会释放，这里写明白）
+        if self._lid_inhibit_fd is not None:
+            os.close(self._lid_inhibit_fd)
+            self._lid_inhibit_fd = None
         if self._input_blocked:
             pc_status_display.set_input_blocked(False)
         if self._asleep:
@@ -593,6 +668,7 @@ class PCStatusApp(tk.Tk):
         self._update_hdmi_btn()
         self._update_laptop_btn()
         self._sync_wake()
+        self._check_lid()
         self._check_auto_sleep()
 
         self.after(UPDATE_MS, self.refresh)

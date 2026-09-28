@@ -9,6 +9,7 @@
 3. 一键关闭 / 打开笔记本自带屏幕，电脑照常运行，只是屏幕不亮。
 4. 无键盘鼠标操作一段时间后，两块屏自动熄灭；时间可调（15 秒测试档，1–120 分），显示倒计时。
 5. 两块屏都熄灭时，**只有 Enter 能唤醒**；鼠标、其他按键都不响应，摸黑乱按也不会误操作。
+6. PC Status 开着时**合盖不睡眠**（可关），合盖后任务照常跑。
 
 ## 2. 运行环境
 
@@ -170,11 +171,33 @@ Wayland 下普通程序读不到全局按键；GNOME 的 IdleMonitor 只能告�
 
 `屏蔽 = 自动灭屏中 或 (笔记本屏手动关了 且 HDMI 没开)`，也就是"两块屏都黑着"。只关笔记本屏、HDMI 还开着时不屏蔽——人还在用外接屏。
 
+### 8.8 合盖不睡眠
+
+**问题**：系统默认 `HandleLidSwitch=suspend`，没接外接屏时合盖整台机器睡眠，跑着的任务都停了。接着外接屏时 logind 视为 docked（`HandleLidSwitchDocked=ignore`），本来就不睡眠。
+
+**做法**：勾选「合盖不睡眠」（设置 `lid_no_suspend`，默认开）时，调 logind `Manager.Inhibit("handle-lid-switch", …, "block")` 拿一个锁 fd 并一直持有。
+
+- `handle-lid-switch` 是底层锁，**不受 `LidSwitchIgnoreInhibited=yes` 影响**，总是生效；GNOME 的 gsd-power 接外接屏时也是用它。
+- 本地活动会话的用户申请不需要 sudo（polkit 默认允许）。拿不到就弹错误、取消勾选。
+- 锁的生命周期跟 fd 一样：取消勾选时 `close`；PC Status 退出、崩溃、被 kill 都会自动释放，系统恢复合盖睡眠。不改 `/etc/systemd/logind.conf`，只在 PC Status 开着时生效。
+
+**合盖 / 开盖时做什么**（每秒读 logind `Manager.LidClosed`，灭屏期间 250 ms 读一次）：
+
+| 事件 | 处理 |
+|---|---|
+| 合盖，HDMI 没开 | 灭屏 + 屏蔽输入，跟自动灭屏一样只认 Enter。否则只剩笔记本屏时 Mutter 会让它在盖子里一直亮着 |
+| 合盖，HDMI 开着 | 不管（合盖用外接屏） |
+| 开盖 | 唤醒：灭着的屏点亮；手动关掉的笔记本屏背光也恢复。开盖是明确想用电脑，不算"误操作" |
+
+开盖时 Mutter 也会重新配置显示器（serial 变了），`_poll_auto_wake` 先查开盖再查 serial，不然会被 §8.6 当成"不是 Enter"又灭掉。
+
+**代价**：合盖不锁屏，开盖直接回到桌面。
+
 ## 9. 状态与文件
 
 | 路径 | 谁写 | 内容 |
 |---|---|---|
-| `~/.config/pc_status/settings.json` | PC Status | 自动灭屏开关、时间（秒） |
+| `~/.config/pc_status/settings.json` | PC Status | 自动灭屏开关、时间（秒）、合盖不睡眠开关 |
 | `~/.cache/pc_status/display_layout.json` | PC Status | 关 HDMI 前的布局 |
 | `~/.cache/pc_status/backlight.json` | PC Status | 关笔记本屏前的亮度 |
 | `~/.cache/pc_status/pc_status.lock` | PC Status | 单实例锁 |
@@ -256,3 +279,4 @@ busctl --user get-property org.gnome.Mutter.DisplayConfig /org/gnome/Mutter/Disp
 - 手动"两块都黑"（HDMI 关 + 笔记本屏背光 0）期间合盖 / 开盖，背光会不会被系统改动，没有实测。
 - 只支持 GNOME（Mutter 的 D-Bus 接口）。其他桌面上屏幕相关按钮会显示"不可用"，资源监控照常。
 - 真机上还没完整走过一遍：自动灭屏 → 乱按 / 动鼠标 / 合盖 → 屏幕保持黑 → Enter 唤醒。
+- 合盖不睡眠（§8.8）已实测：合盖不睡眠、屏幕熄灭。窗口高度为新增的复选框按估算加了 27px，可能要微调。

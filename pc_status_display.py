@@ -362,6 +362,48 @@ def hdmi_geometry():
     return None
 
 
+# ---------- 合盖不睡眠（systemd-logind） ----------
+#
+# 向 logind 申请 "handle-lid-switch" 的 block 锁：持有期间合盖不会触发 HandleLidSwitch
+# （默认 suspend）。这种底层锁不受 LidSwitchIgnoreInhibited 影响，GNOME 自己接外接屏时
+# 也是这样做的。锁就是一个 fd，关掉 fd 或进程退出（包括崩溃、被 kill）就自动释放。
+# 本地活动会话的用户申请不需要 sudo（polkit 默认允许）。
+
+_LOGIN1 = ("org.freedesktop.login1", "/org/freedesktop/login1", "org.freedesktop.login1.Manager")
+
+
+def inhibit_lid_switch(reason):
+    """拿到合盖锁，返回 fd；释放时 os.close(fd)。"""
+    try:
+        bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+        result, fd_list = bus.call_with_unix_fd_list_sync(
+            *_LOGIN1, "Inhibit",
+            GLib.Variant("(ssss)", ("handle-lid-switch", "PC Status", reason, "block")),
+            GLib.VariantType("(h)"), Gio.DBusCallFlags.NONE, 3000, None, None,
+        )
+    except GLib.Error as e:
+        raise DisplayError(e.message) from e
+    fds = fd_list.steal_fds()
+    index = result.unpack()[0]
+    for i, fd in enumerate(fds):
+        if i != index:
+            os.close(fd)
+    return fds[index]
+
+
+def lid_closed():
+    """盖子合着返回 True，开着 False，查不到（台式机、logind 连不上）返回 None。"""
+    try:
+        bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+        return bus.call_sync(
+            _LOGIN1[0], _LOGIN1[1], "org.freedesktop.DBus.Properties", "Get",
+            GLib.Variant("(ss)", (_LOGIN1[2], "LidClosed")),
+            None, Gio.DBusCallFlags.NONE, 3000, None,
+        ).unpack()[0]
+    except GLib.Error:
+        return None
+
+
 _GRAB_FILE = "/run/pc-status/grab"
 
 
