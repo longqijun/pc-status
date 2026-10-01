@@ -28,6 +28,10 @@ NET_BAR_MAX = 5 * 1024 * 1024
 
 MINI_SIZE = (190, 358)
 FULL_SIZE = (572, 448)
+# 上面的尺寸和进度条长度都是按 1 倍缩放的屏幕调的。2 倍缩放的高分屏（比如 MacBook）上，
+# Xwayland 里的 Tk 字体按 Xft.dpi=192 放大了一倍，像素值却不会自己放大，
+# 窗口会把内容截掉一大半；所以像素值统一乘上 UI_SCALE，见 detect_ui_scale()。
+UI_SCALE = 1.0
 # 启动位置：贴屏幕右边，从顶部往下约 30% 处
 TOP_RATIO = 0.30
 # 两块屏都黑着时，每隔多久查一次有没有键盘/鼠标操作
@@ -117,13 +121,31 @@ class WakeWatcher:
         return woke
 
 
+def detect_ui_scale():
+    """按 Xft.dpi 算界面缩放倍数（96 dpi = 1 倍），读不到就当 1 倍。"""
+    try:
+        out = subprocess.run(
+            ["xrdb", "-query"], capture_output=True, text=True, timeout=2
+        ).stdout
+        m = re.search(r"^Xft\.dpi:\s*([\d.]+)", out, re.M)
+        if m:
+            return max(1.0, float(m.group(1)) / 96)
+    except Exception:
+        pass
+    return 1.0
+
+
+def px(value):
+    return int(round(value * UI_SCALE))
+
+
 class Gauge(ttk.Frame):
     """完整模式的一行：标题 + 进度条 + 详情文字。"""
 
     def __init__(self, parent, title):
         super().__init__(parent)
         ttk.Label(self, text=title, width=10, anchor="w").pack(side="left")
-        self.bar = ttk.Progressbar(self, length=220, maximum=100)
+        self.bar = ttk.Progressbar(self, length=px(220), maximum=100)
         self.bar.pack(side="left", padx=8)
         self.detail = ttk.Label(self, text="--", width=28, anchor="w")
         self.detail.pack(side="left")
@@ -139,7 +161,7 @@ class MiniGauge(ttk.Frame):
     def __init__(self, parent, title):
         super().__init__(parent)
         ttk.Label(self, text=title, width=4, anchor="w").pack(side="left")
-        self.bar = ttk.Progressbar(self, length=80, maximum=100)
+        self.bar = ttk.Progressbar(self, length=px(80), maximum=100)
         self.bar.pack(side="left", padx=4)
         self.value = ttk.Label(self, text="--", width=8, anchor="e")
         self.value.pack(side="left")
@@ -152,6 +174,12 @@ class MiniGauge(ttk.Frame):
 class PCStatusApp(tk.Tk):
     def __init__(self):
         super().__init__(className="pc_status")
+        global UI_SCALE
+        UI_SCALE = detect_ui_scale()
+        style = ttk.Style(self)
+        style.configure("Horizontal.TProgressbar", thickness=px(15))
+        style.configure("TCheckbutton", indicatordiameter=px(12))
+        style.configure("TSpinbox", arrowsize=px(10))
         self.title("PC Status")
         self.resizable(False, False)
         self.attributes("-topmost", True)
@@ -297,6 +325,10 @@ class PCStatusApp(tk.Tk):
         return self._primary_monitor_geometry()
 
     def _place(self, width, height):
+        # 按缩放放大；万一还是放不下（字体、主题不一样），以实际需要的大小为准
+        self.update_idletasks()
+        width = max(px(width), self.winfo_reqwidth())
+        height = max(px(height), self.winfo_reqheight())
         mon_w, mon_h, mon_x, mon_y = self._target_monitor_geometry()
         x = mon_x + mon_w - width
         y = mon_y + int(mon_h * TOP_RATIO)
